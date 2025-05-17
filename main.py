@@ -2,7 +2,7 @@ import discord
 from discord.ext import commands, tasks
 import asyncio
 
-TOKEN = "MTM3Mjc0NTk1NDU2MTYyNjExMg.GtTfqJ.ADaHm1iehs5iZjJFbT0XQTnqxsun5i4UBhzZAk"
+TOKEN = "MTM3Mjc0NTk1NDU2MTYyNjExMg.GbWI4C.bYo8bZlzL3UB0t92G1mtiLx7Oqd_SQG1OsY65M"
 STATUS_CHANNEL_ID = 1372938839164981289
 
 HEADMOD_ID = 1368125926600212531
