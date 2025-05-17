@@ -1,6 +1,7 @@
 import discord
 from discord.ext import commands, tasks
 import asyncio
+import os
 
 TOKEN = os.getenv('TOKEN')
 STATUS_CHANNEL_ID = 1372938839164981289
