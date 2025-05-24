@@ -5,9 +5,18 @@ import datetime
 import json
 import asyncio
 import threading
-from flask import Flask
+from flask import Flask, jsonify
 import firebase_admin
 from firebase_admin import credentials, firestore, auth
+from dotenv import load_dotenv
+
+# --- Load Environment Variables ---
+load_dotenv()  # Load variables from .env file
+
+# Validate environment variables
+DISCORD_BOT_TOKEN = os.environ.get('DISCORD_BOT_TOKEN')
+if not DISCORD_BOT_TOKEN:
+    raise ValueError("DISCORD_BOT_TOKEN environment variable not set. Please set it in the .env file.")
 
 # --- Flask Setup ---
 app = Flask(__name__)
@@ -30,16 +39,20 @@ def get_user_status(user_id):
     return jsonify({"error": "User status not found"}), 404
 
 # --- Global Variables for Firebase ---
-app_id = os.environ.get('__app_id', 'default-app-id')
-firebase_config_str = os.environ.get('__firebase_config', '{}')
-initial_auth_token = os.environ.get('__initial_auth_token', None)
-firebase_config = json.loads(firebase_config_str)
+app_id = os.environ.get('__APP_ID', 'default-app-id')
+firebase_config_str = os.environ.get('__FIREBASE_CONFIG', '{}')
+initial_auth_token = os.environ.get('__INITIAL_AUTH_TOKEN', None)
+try:
+    firebase_config = json.loads(firebase_config_str)
+except json.JSONDecodeError as e:
+    print(f"Error parsing __FIREBASE_CONFIG: {e}")
+    firebase_config = {}
 
 # --- Bot Setup ---
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
-bot = commands.Bot(command_prefix='.', intents=intents)
+bot = commands.Bot(command_prefix=['.', '!'], intents=intents)  # Support both prefixes
 
 # --- Firestore Initialization ---
 db = None
@@ -49,20 +62,15 @@ user_statuses = {}
 status_embed_message_id = None
 STATUSES_COLLECTION_PATH = f"artifacts/{app_id}/public/data/user_statuses"
 EMBED_INFO_COLLECTION_PATH = f"artifacts/{app_id}/public/data/embed_info"
+SUGGESTIONS_COLLECTION_PATH = f"artifacts/{app_id}/public/data/suggestions"
 
 async def initialize_firestore():
     """Initializes Firebase and authenticates the bot."""
     global db, auth_app, user_id
     if not firebase_admin._apps:
         try:
-            cred = credentials.Certificate({
-                "private_key_id": "dummy",
-                "private_key": "dummy",
-                "client_email": "dummy",
-                "client_id": "dummy",
-                "type": "service_account"
-            })
-            firebase_admin.initialize_app(cred, firebase_config)
+            cred = credentials.Certificate(firebase_config)
+            firebase_admin.initialize_app(cred)
             print("Firebase Admin SDK initialized.")
         except Exception as e:
             print(f"Error initializing Firebase Admin SDK: {e}")
@@ -129,12 +137,23 @@ async def set_status_embed_message_id(message_id):
     except Exception as e:
         print(f"Error saving status embed message ID: {e}")
 
+async def save_suggestion_to_firestore(suggestion_data):
+    if not db:
+        print("Firestore not initialized.")
+        return
+    try:
+        await asyncio.to_thread(db.collection(SUGGESTIONS_COLLECTION_PATH).add, suggestion_data)
+        print("Suggestion saved to Firestore.")
+    except Exception as e:
+        print(f"Error saving suggestion: {e}")
+
 # --- Embed Management ---
 STATUS_CHANNEL_ID = 1375511813713821727
+SUGGESTION_CHANNEL_ID = 1375094650003521636
 
 def create_status_embed():
     embed = discord.Embed(
-        title=":hastag~1:  Member Status Board ✨",
+        title=":hastag~1: Member Status Board ✨",
         description="Here's what everyone's up to right now!",
         color=discord.Color.blue()
     )
@@ -198,6 +217,8 @@ async def on_ready():
 async def on_message(message):
     if message.author == bot.user:
         return
+
+    # Handle status mention responses
     if message.mentions:
         for user_mentioned in message.mentions:
             if user_mentioned == bot.user:
@@ -222,11 +243,14 @@ async def on_message(message):
                     print(f"Bot lacks permissions to send messages in {message.channel.name}")
                 except Exception as e:
                     print(f"Error sending mention response: {e}")
+
+    # Process commands for both prefixes
     await bot.process_commands(message)
 
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
+        # Ignore if command not found (likely wrong prefix or typo)
         return
     elif isinstance(error, commands.MissingRequiredArgument):
         await ctx.send(f"Missing argument. Check the command syntax.", delete_after=8)
@@ -234,12 +258,16 @@ async def on_command_error(ctx, error):
         await ctx.send(f"Invalid argument. Please provide valid input.", delete_after=8)
     elif isinstance(error, commands.CommandOnCooldown):
         await ctx.send(f"Command on cooldown. Try again in {error.retry_after:.2f} seconds.", delete_after=8)
+    elif isinstance(error, commands.MissingPermissions):
+        await ctx.send("You don't have the necessary permissions to use this command.", delete_after=8)
     else:
         print(f"Unhandled command error: {error}")
         await ctx.send(f"Error: {error}", delete_after=8)
 
-# --- Status Commands ---
+# --- Status Commands (Prefix: .) ---
 async def set_user_status(ctx, status_text, creative_response):
+    if ctx.prefix != '.':  # Restrict status commands to '.' prefix
+        return
     try:
         await ctx.message.delete(delay=5)
     except discord.Forbidden:
@@ -261,32 +289,34 @@ async def set_user_status(ctx, status_text, creative_response):
     except Exception as e:
         print(f"Error sending/deleting bot response: {e}")
 
-@bot.command(name='dl')
+@bot.command(name='dl', aliases=['do_later'])
 async def do_later(ctx):
     await set_user_status(ctx, "Do Later", "Task marked for later. Focus on now! 🚧")
 
-@bot.command(name='s')
+@bot.command(name='s', aliases=['sleep'])
 async def sleeping(ctx):
     await set_user_status(ctx, "Sleeping", "You're in dreamland. We'll keep it quiet. 😴")
 
-@bot.command(name='f')
+@bot.command(name='f', aliases=['free'])
 async def free(ctx):
     await set_user_status(ctx, "Free", "Ready for action! Let’s go! ✅")
 
-@bot.command(name='srn')
+@bot.command(name='srn', aliases=['studying'])
 async def studying_right_now(ctx):
     await set_user_status(ctx, "Studying Right Now", "Deep in study mode! Keep it up! 📚")
 
-@bot.command(name='o')
+@bot.command(name='o', aliases=['out'])
 async def outside(ctx):
     await set_user_status(ctx, "Outside", "Enjoy the outdoors! We'll catch you later. 🚶‍♂️")
 
-@bot.command(name='b')
+@bot.command(name='b', aliases=['break'])
 async def on_break(ctx):
     await set_user_status(ctx, "On Break", "Time to recharge! See you soon. ☕")
 
 @bot.command(name='clearstatus')
 async def clear_status(ctx):
+    if ctx.prefix != '.':  # Restrict to '.' prefix
+        return
     try:
         await ctx.message.delete(delay=5)
     except discord.Forbidden:
@@ -316,6 +346,8 @@ async def clear_status(ctx):
 
 @bot.command(name='status')
 async def show_status(ctx):
+    if ctx.prefix != '.':  # Restrict to '.' prefix
+        return
     try:
         await ctx.message.delete(delay=5)
     except discord.Forbidden:
@@ -345,6 +377,8 @@ async def show_status(ctx):
 
 @bot.command(name='statushelp')
 async def status_help(ctx):
+    if ctx.prefix != '.':  # Restrict to '.' prefix
+        return
     try:
         await ctx.message.delete(delay=5)
     except discord.Forbidden:
@@ -373,7 +407,9 @@ async def status_help(ctx):
             "`.b` - Set status to 'On Break'\n"
             "`.clearstatus` - Clear your status\n"
             "`.status` - Show your current status\n"
-            "`.statushelp` - Show this help message"
+            "`.statushelp` - Show this help message\n"
+            "`!suggest` - Submit a suggestion\n"
+            "`!suggesthelp` - Show suggestion system help"
         ),
         inline=False
     )
@@ -383,6 +419,112 @@ async def status_help(ctx):
         print(f"Bot lacks permissions to send messages in {ctx.channel.name}")
     except Exception as e:
         print(f"Error sending help embed: {e}")
+
+# --- Suggestion Commands (Prefix: !) ---
+@bot.command(name='suggest')
+async def submit_suggestion(ctx, *, suggestion: str = None):
+    if ctx.prefix != '!':  # Restrict to '!' prefix
+        return
+    if not suggestion:
+        try:
+            await ctx.send("Please provide a suggestion! Usage: `!suggest <your suggestion here>`", delete_after=8)
+            await ctx.message.delete(delay=5)
+        except discord.Forbidden:
+            print(f"Bot lacks permissions to send/delete messages in {ctx.channel.name}")
+        except Exception as e:
+            print(f"Error handling suggestion command: {e}")
+        return
+
+    suggestion_data = {
+        'author_id': str(ctx.author.id),
+        'author_name': ctx.author.display_name,
+        'suggestion_text': suggestion,
+        'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat()
+    }
+
+    await save_suggestion_to_firestore(suggestion_data)
+
+    # Notify suggestion channel
+    suggestion_channel = bot.get_channel(SUGGESTION_CHANNEL_ID)
+    if suggestion_channel:
+        embed = discord.Embed(
+            title="💡 New Suggestion Received! 💡",
+            description=f"**Submitted by:** {ctx.author.mention}\n\n**Suggestion:**\n{suggestion}",
+            color=discord.Color.gold(),
+            timestamp=datetime.datetime.now(datetime.timezone.utc)
+        )
+        embed.set_footer(text=f"User ID: {ctx.author.id}")
+        try:
+            await suggestion_channel.send(embed=embed)
+            print(f"Suggestion from {ctx.author.display_name} sent to suggestion channel.")
+        except discord.Forbidden:
+            print(f"Bot lacks permissions to send messages in suggestion channel {SUGGESTION_CHANNEL_ID}.")
+        except Exception as e:
+            print(f"Error sending suggestion embed to suggestion channel: {e}")
+    else:
+        print(f"Suggestion channel with ID {SUGGESTION_CHANNEL_ID} not found.")
+
+    # User confirmation in channel (auto-delete)
+    try:
+        confirm_message = await ctx.send(f"✅ Your suggestion has been submitted, {ctx.author.mention}! Thank you for your input. We've notified the staff.")
+        await ctx.message.delete(delay=5)
+        await confirm_message.delete(delay=5)
+    except discord.Forbidden:
+        print(f"Bot lacks permissions to send/delete messages in {ctx.channel.name}.")
+    except Exception as e:
+        print(f"Error sending/deleting user confirmation in channel: {e}")
+
+    # User confirmation via DM
+    try:
+        dm_embed = discord.Embed(
+            title="Suggestion Confirmation",
+            description="Thank you for your suggestion! We've received it and appreciate your input.",
+            color=discord.Color.green()
+        )
+        dm_embed.add_field(name="Your Suggestion:", value=suggestion, inline=False)
+        dm_embed.add_field(name="Submitted At:", value=datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"), inline=False)
+        await ctx.author.send(embed=dm_embed)
+        print(f"Suggestion confirmation sent to {ctx.author.display_name} via DM.")
+    except discord.Forbidden:
+        print(f"Could not DM {ctx.author.display_name}. They might have DMs disabled or the bot is blocked.")
+    except Exception as e:
+        print(f"Error sending DM confirmation: {e}")
+
+@bot.command(name='suggesthelp')
+async def suggest_help(ctx):
+    if ctx.prefix != '!':  # Restrict to '!' prefix
+        return
+    try:
+        await ctx.message.delete(delay=5)
+    except discord.Forbidden:
+        print(f"Bot lacks permissions to delete messages in {ctx.channel.name}")
+    except Exception as e:
+        print(f"Error deleting user message: {e}")
+
+    help_embed = discord.Embed(
+        title="💡 Suggestion System Help 💡",
+        description="Here's how you can submit your ideas and feedback!",
+        color=discord.Color.purple()
+    )
+    help_embed.set_thumbnail(url="https://placehold.co/100x100/D8BFD8/000000?text=Suggest")
+    help_embed.add_field(
+        name="How to Submit a Suggestion:",
+        value="Use the command `!suggest <your suggestion here>`.\n\n"
+              "**Example:** `!suggest Add a new channel for game discussions.`",
+        inline=False
+    )
+    help_embed.add_field(
+        name="What Happens Next?",
+        value="Your suggestion will be sent to the staff team for review. You'll receive a confirmation message in the channel and a DM.",
+        inline=False
+    )
+    help_embed.set_footer(text="Thank you for helping us improve!")
+    try:
+        await ctx.send(embed=help_embed)
+    except discord.Forbidden:
+        print(f"Bot lacks permissions to send messages in {ctx.channel.name}")
+    except Exception as e:
+        print(f"Error sending suggestion help embed: {e}")
 
 # --- Run Flask and Discord Bot ---
 def run_flask():
@@ -398,12 +540,10 @@ async def main():
 
     # Start Discord bot
     try:
-        discord_token = os.environ.get('DISCORD_BOT_TOKEN')
-        if not discord_token:
-            raise ValueError("DISCORD_BOT_TOKEN environment variable not set.")
-        await bot.start(discord_token)
+        await bot.start(DISCORD_BOT_TOKEN)
     except Exception as e:
         print(f"Error starting Discord bot: {e}")
+        raise
 
 if __name__ == '__main__':
     # Run the async main function
